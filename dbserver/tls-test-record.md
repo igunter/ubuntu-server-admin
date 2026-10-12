@@ -12,7 +12,7 @@ No secrets in this file: no passwords, private keys, access keys or passphrases.
 | Application server | Ubuntu 24.04, private IP `172.26.0.238` (host `ip-172-26-0-238`) |
 | Database / user tested | `dbscheckcrm` / `dbscheckcrm` |
 | TLS setup | Private CA and server certificate created by `dbserver/enable-tls.sh`; certificate valid for the IP `172.26.9.114`; minimum protocol TLS 1.2 |
-| Listening addresses | `localhost` and the private IP `172.26.9.114` only (no public address). No public PostgreSQL port is opened in the Lightsail firewall. |
+| Listening addresses | `localhost` and the private IP `172.26.9.114` only (no public address). |
 
 ## 1. Server-side enforcement (on the database server)
 
