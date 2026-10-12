@@ -27,7 +27,7 @@ MONITOR=/usr/local/sbin/pgbackrest-monitor
 CRON=/etc/cron.d/pgbackrest
 ALERT_ENV=/etc/pgbackrest/alert.env
 STANZA=${STANZA:-main}
-KEEP_FULL=${KEEP_FULL:-3}        # weekly fulls kept (3 => 14-21 days of history)
+KEEP_FULL=${KEEP_FULL:-4}        # weekly fulls kept (4 => 21-28 days of history, margin over 14)
 WINDOW_DAYS=${WINDOW_DAYS:-14}   # the monitor alerts if history is shorter
 
 [[ $EUID -eq 0 ]] || { err "Run as root: sudo $0"; exit 1; }
@@ -227,9 +227,12 @@ else
     oldest=$(jq '[.[0].backup[].timestamp.start] | min' <<<"$info")
     newest_full=$(jq '[.[0].backup[] | select(.type=="full") | .timestamp.start] | max' <<<"$info")
     ((now - newest_full > 8*86400)) && problems+=("newest full backup is $(((now-newest_full)/86400)) days old")
-    # Expected to be short until the required number of full backups exist.
-    fulls=$(jq '[.[0].backup[] | select(.type=="full")] | length' <<<"$info")
-    if ((fulls >= KEEP_FULL)) && ((now - oldest < WINDOW_DAYS*86400)); then
+    # The window can only be met once the repository is old enough. Remember when the
+    # oldest backup was first seen, and only require the full window after that.
+    first_file=${FIRST_FILE:-/var/spool/pgbackrest/.monitor_first_backup}
+    [[ -s $first_file ]] || echo "$oldest" > "$first_file" 2>/dev/null
+    first=$(cat "$first_file" 2>/dev/null || echo "$oldest")
+    if ((now - first >= WINDOW_DAYS*86400)) && ((now - oldest < WINDOW_DAYS*86400)); then
         problems+=("history only goes back $(((now-oldest)/86400)) days (need $WINDOW_DAYS)")
     fi
 fi
@@ -284,6 +287,13 @@ report() {
 }
 
 main() {
+    if [[ ${1:-} == monitor ]]; then   # refresh only the monitor script and cron file
+        preflight
+        write_monitor
+        write_cron
+        ok "Monitor and schedule updated."
+        return
+    fi
     preflight
     install_packages
     gather_settings
