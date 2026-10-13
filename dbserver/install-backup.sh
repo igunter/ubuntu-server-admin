@@ -8,9 +8,11 @@
 #   - WAL archiving to S3 (archive_timeout = 60s, so changes are shipped at
 #     least once a minute while the database is busy)
 #   - pgBackRest repository encryption (aes-256-cbc), on top of S3 encryption
-#   - weekly full + daily differential backups (cron), keeping 3 full backups
+#   - weekly full + daily differential backups (cron), keeping 4 full backups
 #     so any point in the previous 14 days can be restored
 #   - an hourly monitor that alerts when the 14-day window or archiving breaks
+#   - an every-minute archive-freshness watch that alerts within about 4 minutes
+#     if finished WAL is not reaching the bucket (supports the 5-minute RPO)
 #   - a weekly `pgbackrest verify` that checks the WAL history has no gaps
 #
 # Needs: PostgreSQL already installed (dbserver/install-db.sh), an S3 bucket in
@@ -24,11 +26,13 @@ DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 
 CONF=/etc/pgbackrest/pgbackrest.conf
 MONITOR=/usr/local/sbin/pgbackrest-monitor
+WATCH=/usr/local/sbin/pgbackrest-archive-watch
 CRON=/etc/cron.d/pgbackrest
 ALERT_ENV=/etc/pgbackrest/alert.env
 STANZA=${STANZA:-main}
 KEEP_FULL=${KEEP_FULL:-4}        # weekly fulls kept (4 => 21-28 days of history, margin over 14)
 WINDOW_DAYS=${WINDOW_DAYS:-14}   # the monitor alerts if history is shorter
+STALL_SEC=${STALL_SEC:-180}      # the archive watch alerts if finished WAL waits longer than this
 
 [[ $EUID -eq 0 ]] || { err "Run as root: sudo $0"; exit 1; }
 
@@ -100,6 +104,10 @@ gather_settings() {
     echo "  is well and signals failure when not, and the service alerts you if pings stop"
     echo "  altogether - which catches a dead server. Leave blank to skip (logs only)."
     ask "Ping URL" PING_URL "${PING_URL:-}"
+    echo
+    echo "  The archive-freshness watch runs every minute and needs its OWN check in the"
+    echo "  alert service (expected every 1 minute, grace 3 minutes). Do not reuse the URL above."
+    ask_secret "Archive-watch ping URL (hidden; blank = log only)" ARCHIVE_PING_URL
 }
 
 write_config() {
@@ -183,9 +191,25 @@ write_alert_env() {
     umask 077
     cat > "$ALERT_ENV" <<EOF
 PING_URL='${PING_URL//\'/}'
+ARCHIVE_PING_URL='${ARCHIVE_PING_URL//\'/}'
 EOF
     chown postgres:postgres "$ALERT_ENV"
     chmod 600 "$ALERT_ENV"
+}
+
+# Set or replace only the archive-watch URL in alert.env, leaving PING_URL as it is.
+# The URL is typed hidden so it never appears in the shell history or on screen.
+set_archive_url() {
+    local url
+    [[ -f $ALERT_ENV ]] || { err "$ALERT_ENV not found. Run the full installer first."; exit 1; }
+    ask_secret "Archive-watch ping URL (hidden)" url
+    [[ $url == https://* ]] || { err "That does not look like an https:// URL. Nothing changed."; exit 1; }
+    umask 077
+    { grep -v '^ARCHIVE_PING_URL=' "$ALERT_ENV" || true; printf "ARCHIVE_PING_URL='%s'\n" "${url//\'/}"; } > "$ALERT_ENV.new"
+    cat "$ALERT_ENV.new" > "$ALERT_ENV"; rm -f "$ALERT_ENV.new"
+    chown postgres:postgres "$ALERT_ENV"
+    chmod 600 "$ALERT_ENV"
+    ok "Archive-watch URL saved in $ALERT_ENV."
 }
 
 write_monitor() {
@@ -214,8 +238,9 @@ if [[ -z $arch ]]; then
 else
     IFS='|' read -r _failed age failing <<<"$arch"
     [[ $failing == true ]] && problems+=("PostgreSQL reports the latest archive attempt FAILED")
-    # The hourly 'pgbackrest check' above forces a WAL switch and confirms it reached
-    # the bucket, so an idle database is covered too.
+    # Archive freshness (the 5-minute recovery target) is watched every minute by
+    # pgbackrest-archive-watch. This hourly check also forces a WAL switch with
+    # 'pgbackrest check', which confirms an idle database can still archive.
     :
 fi
 
@@ -252,6 +277,55 @@ EOF
     chmod 755 "$MONITOR"
 }
 
+write_archive_watch() {
+    cat > "$WATCH" <<'EOF'
+#!/usr/bin/env bash
+# Archive-freshness watch for pgBackRest. Run every minute as the postgres user.
+# A finished WAL segment gets a ".ready" marker until it has been archived, so a
+# marker that stays too long means WAL is not reaching the bucket. This works on an
+# idle database too (no activity means no markers, so no false alarm).
+# Alerts if: a marker is older than STALL_SEC, archive_mode is off, or PostgreSQL
+# cannot be reached. Pings ARCHIVE_PING_URL when fine, and its /fail when not.
+STALL_SEC=${STALL_SEC:-__STALL__}
+ALERT_ENV=${ALERT_ENV:-/etc/pgbackrest/alert.env}
+[[ -r $ALERT_ENV ]] && . "$ALERT_ENV"
+url=${ARCHIVE_PING_URL:-}
+problems=()
+q() { psql -Atq -v ON_ERROR_STOP=1 "$@" 2>/dev/null; }
+
+if ! mode=$(q -c 'SHOW archive_mode') || [[ -z $mode ]]; then
+    problems+=("cannot connect to PostgreSQL")
+else
+    [[ $mode == on || $mode == always ]] || problems+=("archive_mode is '$mode' (archiving is off)")
+    dir=$(q -c 'SHOW data_directory')/pg_wal/archive_status
+    if [[ ! -d $dir ]]; then
+        problems+=("cannot read $dir")
+    else
+        mapfile -t ready < <(find "$dir" -maxdepth 1 -name '*.ready' -printf '%T@\n' 2>/dev/null | sort -n)
+        if ((${#ready[@]})); then
+            age=$(( $(date +%s) - ${ready[0]%.*} ))
+            if ((age > STALL_SEC)); then
+                failed=$(q -c 'SELECT failed_count FROM pg_stat_archiver') || failed='?'
+                problems+=("${#ready[@]} finished WAL segment(s) not archived; the oldest has waited $((age/60)) min $((age%60)) s (limit $((STALL_SEC/60)) min); failed archive attempts so far: ${failed:-?}")
+            fi
+        fi
+    fi
+fi
+
+if ((${#problems[@]})); then
+    msg="WAL archive stalled on $(hostname): ${problems[*]}"
+    logger -p user.err -t pgbackrest-archive-watch "$msg"
+    echo "$msg" >&2
+    [[ -n $url ]] && curl -fsS -m 10 --retry 1 --data-raw "$msg" "${url%/}/fail" >/dev/null 2>&1
+    exit 1
+fi
+[[ -n $url ]] && curl -fsS -m 10 --retry 1 "$url" >/dev/null 2>&1
+exit 0
+EOF
+    sed -i "s/__STALL__/$STALL_SEC/" "$WATCH"
+    chmod 755 "$WATCH"
+}
+
 write_cron() {
     cat > "$CRON" <<EOF
 # Managed by dbserver/install-backup.sh
@@ -264,6 +338,8 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 0 4 * * 3   postgres  pgbackrest --stanza=$STANZA verify
 # Hourly health check; a ping URL is signalled either way
 7 * * * *   postgres  $MONITOR
+# Every minute: has finished WAL reached the bucket? (the 5-minute recovery target)
+* * * * *   postgres  flock -n /var/spool/pgbackrest/.archive-watch.lock $WATCH
 EOF
     chmod 644 "$CRON"
 }
@@ -274,7 +350,8 @@ report() {
     echo "  Bucket:        s3://$BUCKET  ($REGION)"
     echo "  WAL archiving: every 60s while busy (archive_timeout)"
     echo "  Backups:       full Sun 02:00, differential Mon-Sat 02:00, $KEEP_FULL fulls kept"
-    echo "  Monitor:       hourly (/usr/local/sbin/pgbackrest-monitor), alerts: ${PING_URL:-log only (no ping URL)}"
+    echo "  Monitor:       hourly (/usr/local/sbin/pgbackrest-monitor), alerts: $([[ -n ${PING_URL:-} ]] && echo "ping URL set" || echo "log only")"
+    echo "  Archive watch: every minute ($WATCH), stall limit $((STALL_SEC/60)) min, alerts: $([[ -n ${ARCHIVE_PING_URL:-} ]] && echo "ping URL set" || echo "log only")"
     echo "  Check:         sudo -u postgres pgbackrest --stanza=$STANZA info"
     if [[ ${GENERATED:-0} == 1 ]]; then
         echo
@@ -287,11 +364,16 @@ report() {
 }
 
 main() {
-    if [[ ${1:-} == monitor ]]; then   # refresh only the monitor script and cron file
+    if [[ ${1:-} == monitor ]]; then   # refresh only the monitor scripts and cron file
         preflight
         write_monitor
+        write_archive_watch
         write_cron
-        ok "Monitor and schedule updated."
+        ok "Monitor, archive watch and schedule updated."
+        return
+    fi
+    if [[ ${1:-} == archive-url ]]; then   # set the archive-watch ping URL only
+        set_archive_url
         return
     fi
     preflight
@@ -303,6 +385,7 @@ main() {
     first_backup
     write_alert_env
     write_monitor
+    write_archive_watch
     write_cron
     report
 }

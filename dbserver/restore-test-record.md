@@ -42,7 +42,8 @@ These timings are for a 29 MB database and do not represent production. Re-time 
 
 | Item | Value |
 | --- | --- |
-| Monitor | Hourly check at 7 minutes past (`pgbackrest-monitor`), plus weekly `pgbackrest verify` |
+| Monitor | Hourly check at 7 minutes past (`pgbackrest-monitor`): archive check, backup age and 14-day history window; plus weekly `pgbackrest verify` |
+| Archive freshness (5-minute recovery target) | Checked **every minute** (`pgbackrest-archive-watch`). PostgreSQL marks each finished WAL segment until it has been archived; if any segment waits more than 3 minutes the watch alerts, and it also alerts if PostgreSQL is unreachable or archiving is switched off. WAL is switched at least every 60 seconds while the database is busy (`archive_timeout`). It has its own check in the alert service (expected every 1 minute, grace 3 minutes), so a dead server or stopped cron job also alerts within about 4 minutes. |
 | Alert service | In-house monitoring service on a separate server from the database server. Check "DBServer pgBackRest backup monitor": expected every 1 hour, grace 30 minutes. A missed ping or an explicit failure signal raises an alert. |
 | Alert recipients | The team Slack group (tested 2026-10-13). |
 | Failure alert tested | 2026-10-13 about 13:26 UK time: a failure signal from the monitor raised a "[DOWN] ... backup monitor reported a failure" alert in the team Slack group. At about 13:28 a successful run raised "[RECOVERED] ... is checking in again". (The failure was caused by running the monitor as the wrong user, which is how it was triggered; the monitor is run as the `postgres` user by cron.) |
@@ -53,4 +54,5 @@ These timings are for a 29 MB database and do not represent production. Re-time 
 - Done: disk encryption at rest confirmed in writing by AWS (see `tls-test-record.md`, section 5).
 - Done: TLS enforcement and verification details handed to the application (see `tls-test-record.md`).
 - Outbound IP observed and recorded (`tls-test-record.md`). Outbound TCP 444 to the DBS host is still to be tested, only when separately agreed.
+- Archive-stall alert: logic tested against a throwaway PostgreSQL 16 server (stalled, recovered, server down). The live-server test (`dbserver/archive-stall-test.sh`) is **pending**; the result and times will be added here.
 - Re-time the restore with production-sized data.

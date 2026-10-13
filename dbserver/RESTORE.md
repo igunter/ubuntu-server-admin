@@ -78,6 +78,7 @@ Record the date, who ran it, and the timings.
 - [ ] Restore to after T2. The rows are gone.
 - [ ] Repeat the restore using **only** the bucket, the read-only key and the passphrase from the password manager (as if the original server was lost).
 - [ ] The restored application (if tested) made no external calls: no emails, no DBS submissions.
+- [ ] Archive-stall alert tested on the live server: `sudo bash dbserver/archive-stall-test.sh` (breaks archiving for about 4 to 6 minutes, times the alert, restores it and proves the queued WAL was archived). Record the times.
 - [ ] Failure alert tested: break archiving briefly (e.g. rename the bucket in the test config on a non-production copy, or run the monitor with a bad stanza) and confirm the alert recipients get it.
 - [ ] Timings recorded: restore of base backup, WAL replay, rebuild server, deploy app, repoint access. Total is the measured recovery time.
 - [ ] Scratch instance deleted afterwards.
