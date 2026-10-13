@@ -10,7 +10,7 @@ No secrets in this file: no passwords, private keys, access keys or passphrases.
 | Run by | Ian Gunter |
 | Database server | Ubuntu 24.04, PostgreSQL 16, private IP `172.26.9.114`, port 5432 |
 | Application server | Ubuntu 24.04, private IP `172.26.0.238` (host `ip-172-26-0-238`) |
-| Database / user tested | `dbscheckcrm` / `dbscheckcrm` |
+| Database / user tested | `dbscheckcrm` / `dbscheckcrm` (original role; sections 1 to 4). Replaced by separate owner and runtime roles: see section 6 |
 | TLS setup | Private CA and server certificate created by `dbserver/enable-tls.sh`; certificate valid for the IP `172.26.9.114`; minimum protocol TLS 1.2 |
 | Listening addresses | `localhost` and the private IP `172.26.9.114` only (no public address). |
 
@@ -80,6 +80,31 @@ Received 2026-10-13 from AWS Support, in reply to our case about the Lightsail i
 - Applies to all new and existing Lightsail instances in all regions where Lightsail is available.
 
 The full reply is held in the AWS Support case (case ID available on request). Backups are separately encrypted by pgBackRest (aes-256-cbc) before they leave the server.
+
+## 6. Role separation: runtime role connects, original role locked out
+
+Run 2026-10-13, about 13:36 to 13:38 UK time, from the application server (`ip-172-26-0-238`), after `dbserver/split-roles.sh` split the original role into a migration/owner role (`dbscheckcrm_owner`) and a runtime role (`dbscheckcrm_app`). Sections 1 to 4 above were run with the original role, which no longer has access.
+
+Runtime role, with `verify-full` (password typed at the prompt, not recorded):
+
+```
+psql "host=172.26.9.114 dbname=dbscheckcrm user=dbscheckcrm_app sslmode=verify-full sslrootcert=/etc/ssl/pg/ca.crt" -c "SELECT current_user;"
+
+  current_user
+-----------------
+ dbscheckcrm_app
+(1 row)
+```
+
+Original role, refused:
+
+```
+psql "host=172.26.9.114 dbname=dbscheckcrm user=dbscheckcrm sslmode=verify-full sslrootcert=/etc/ssl/pg/ca.crt" -c "SELECT 1;"
+
+psql: error: connection to server at "172.26.9.114", port 5432 failed: FATAL:  no pg_hba.conf entry for host "172.26.0.238", user "dbscheckcrm", database "dbscheckcrm", SSL encryption
+```
+
+Result: the runtime role connects over verified TLS; the original role has no access rule, so it cannot connect.
 
 ## Outstanding before cutover
 
