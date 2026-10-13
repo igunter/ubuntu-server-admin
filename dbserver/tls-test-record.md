@@ -70,8 +70,18 @@ Result: matches the fixed outbound IP agreed for DBS. TCP 444 to DBS UAT has **n
 - If the application server's private IP changes, update the database access rule (`dbserver/install-db.sh`) and repeat tests 2 and 3.
 - The CA is valid for 10 years and the server certificate for 3 years (issued 2026-10-09). Renewal of the server certificate is due before it expires: re-run `dbserver/enable-tls.sh`, which issues a new server certificate from the same CA.
 
+## 5. Disk encryption at rest (AWS written confirmation)
+
+Received 2026-10-13 from AWS Support, in reply to our case about the Lightsail instance that runs PostgreSQL (eu-west-2). Summary of their written reply:
+
+- Lightsail instance **system (root) disks are encrypted at rest by default** with AES-256, applied automatically. PostgreSQL's data directory is on the system disk of the database server, so its data is covered.
+- The same applies to attached block-storage disks and to snapshots created from instances and disks (snapshots inherit the source's encryption).
+- Keys are AWS-managed. Lightsail does not support customer-managed KMS keys for these disks. No configuration is needed and none can be turned off.
+- Applies to all new and existing Lightsail instances in all regions where Lightsail is available.
+
+The full reply is held in the AWS Support case (case ID available on request). Backups are separately encrypted by pgBackRest (aes-256-cbc) before they leave the server.
+
 ## Outstanding before cutover
 
-- Confirmation of which encrypted disk holds PostgreSQL's data (AWS written confirmation, or data moved to an attached disk).
 - Production-sized restore rehearsal (see `restore-test-record.md`).
 - DBS UAT TCP 444 connectivity test, when agreed.
