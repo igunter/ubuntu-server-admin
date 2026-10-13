@@ -100,7 +100,7 @@ ok "Baseline healthy."
 
 # ---- break archiving --------------------------------------------------------
 printf '%s' "$orig" > "$SAVE"
-trap 'echo; warn "Interrupted: restoring archiving..."; restore_archiving; exit 130' INT TERM
+trap 'echo; warn "Interrupted: restoring archiving..."; restore_archiving; exit 130' INT TERM HUP
 trap 'restore_archiving' EXIT
 
 set_archive_command '/bin/false' || { err "Could not change archive_command."; exit 1; }
@@ -161,5 +161,5 @@ fi
 echo "Archiving restored at:  $t_restored_txt"
 echo "Queued WAL archived:    $([[ $left == 0 ]] && echo yes || echo NO)"
 echo "Add the time the alert arrived in Slack, and the recovery time, to the record."
-trap - EXIT INT TERM
+trap - EXIT INT TERM HUP
 [[ -n $t_detect && $rrc == 0 && $left == 0 ]] || exit 1
