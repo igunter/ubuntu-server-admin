@@ -46,7 +46,7 @@ These timings are for a 29 MB database and do not represent production. Re-time 
 | Alert service | In-house monitoring service on a separate server from the database server. Check "DBServer pgBackRest backup monitor": expected every 1 hour, grace 30 minutes. A missed ping or an explicit failure signal raises an alert. |
 | Alert recipients | The team Slack group (tested 2026-10-13). |
 | Failure alert tested | 2026-10-13 about 13:26 UK time: a failure signal from the monitor raised a "[DOWN] ... backup monitor reported a failure" alert in the team Slack group. At about 13:28 a successful run raised "[RECOVERED] ... is checking in again". (The failure was caused by running the monitor as the wrong user, which is how it was triggered; the monitor is run as the `postgres` user by cron.) |
-| Still to test | Missed-ping alert (no check-in within period plus grace). To be recorded when done. |
+| Missed-ping alert tested | 2026-10-13: a temporary test check (5 minute period, 1 minute grace, same Slack notification) was pinged once at 13:44:36 UK time (12:44:36 UTC) and then left silent. The "missed its expected check-in" alert arrived in Slack at 13:51:41 UK time (12:51:41 UTC), 7 minutes 5 seconds later. The test check was then deleted. A check only alerts after it has received at least one ping, so a new check must be sent one ping when it is created. |
 
 ## Outstanding before cutover
 
