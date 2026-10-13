@@ -43,9 +43,9 @@ These timings are for a 29 MB database and do not represent production. Re-time 
 | Item | Value |
 | --- | --- |
 | Monitor | Hourly check at 7 minutes past (`pgbackrest-monitor`), plus weekly `pgbackrest verify` |
-| Alert service | Healthchecks (period 1 hour, grace 30 minutes) |
-| Failure alert tested | 2026-10-09 16:00: failure signal received |
-| Alert recipients | Email to the shared mailbox `directors@verifyonline.co.uk` (the Healthchecks plan allows one address, so a shared mailbox is used). |
+| Alert service | In-house monitoring service on a separate server from the database server. Check "DBServer pgBackRest backup monitor": expected every 1 hour, grace 30 minutes. A missed ping or an explicit failure signal raises an alert. |
+| Alert recipients | The team Slack group and the team Telegram group (named members to be listed). Email to `directors@verifyonline.co.uk` is configured as a further route where enabled. |
+| Failure alert tested | **Pending on the in-house service**: date and result to be recorded after the failure signal and missed-ping tests. (An earlier test, 2026-10-09 16:00, was on the previous service, Healthchecks.io, which is no longer used.) |
 
 ## Outstanding before cutover
 
