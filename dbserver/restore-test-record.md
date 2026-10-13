@@ -45,7 +45,7 @@ These timings are for a 29 MB database and do not represent production. Re-time 
 | Monitor | Hourly check at 7 minutes past (`pgbackrest-monitor`), plus weekly `pgbackrest verify` |
 | Alert service | Healthchecks (period 1 hour, grace 30 minutes) |
 | Failure alert tested | 2026-10-09 16:00: failure signal received |
-| Alert recipients | **[to fill in: shared mailbox address and the named people it forwards to]** |
+| Alert recipients | Email to the shared mailbox `directors@verifyonline.co.uk` (the Healthchecks plan allows one address, so a shared mailbox is used). |
 
 ## Outstanding before cutover
 
