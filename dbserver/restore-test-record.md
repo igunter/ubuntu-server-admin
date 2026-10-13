@@ -49,7 +49,7 @@ These timings are for a 29 MB database and do not represent production. Re-time 
 
 ## Outstanding before cutover
 
-- Written confirmation of encryption of the database server's disk (or data moved to an attached encrypted disk).
-- TLS enforcement and verification details handed to the application (`dbserver/enable-tls.sh`).
-- Outbound TCP 444 from the AppServer to the DBS host, and its observed outbound IP.
+- Done: disk encryption at rest confirmed in writing by AWS (see `tls-test-record.md`, section 5).
+- Done: TLS enforcement and verification details handed to the application (see `tls-test-record.md`).
+- Outbound IP observed and recorded (`tls-test-record.md`). Outbound TCP 444 to the DBS host is still to be tested, only when separately agreed.
 - Re-time the restore with production-sized data.
