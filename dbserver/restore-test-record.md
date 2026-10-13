@@ -45,7 +45,8 @@ These timings are for a 29 MB database and do not represent production. Re-time 
 | Monitor | Hourly check at 7 minutes past (`pgbackrest-monitor`), plus weekly `pgbackrest verify` |
 | Alert service | In-house monitoring service on a separate server from the database server. Check "DBServer pgBackRest backup monitor": expected every 1 hour, grace 30 minutes. A missed ping or an explicit failure signal raises an alert. |
 | Alert recipients | The team Slack group and the team Telegram group (named members to be listed). Email to `directors@verifyonline.co.uk` is configured as a further route where enabled. |
-| Failure alert tested | **Pending on the in-house service**: date and result to be recorded after the failure signal and missed-ping tests. (An earlier test, 2026-10-09 16:00, was on the previous service, Healthchecks.io, which is no longer used.) |
+| Failure alert tested | 2026-10-13 about 13:26 UK time: a failure signal from the monitor raised a "[DOWN] ... backup monitor reported a failure" alert in the team Slack group. At about 13:28 a successful run raised "[RECOVERED] ... is checking in again". (The failure was caused by running the monitor as the wrong user, which is how it was triggered; the monitor is run as the `postgres` user by cron.) |
+| Still to test | Missed-ping alert (no check-in within period plus grace) and delivery of alerts to the Telegram group. To be recorded when done. |
 
 ## Outstanding before cutover
 
