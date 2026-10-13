@@ -48,11 +48,12 @@ These timings are for a 29 MB database and do not represent production. Re-time 
 | Alert recipients | The team Slack group (tested 2026-10-13). |
 | Failure alert tested | 2026-10-13 about 13:26 UK time: a failure signal from the monitor raised a "[DOWN] ... backup monitor reported a failure" alert in the team Slack group. At about 13:28 a successful run raised "[RECOVERED] ... is checking in again". (The failure was caused by running the monitor as the wrong user, which is how it was triggered; the monitor is run as the `postgres` user by cron.) |
 | Missed-ping alert tested | 2026-10-13: a temporary test check (5 minute period, 1 minute grace, same Slack notification) was pinged once at 13:44:36 UK time (12:44:36 UTC) and then left silent. The "missed its expected check-in" alert arrived in Slack at 13:51:41 UK time (12:51:41 UTC), 7 minutes 5 seconds later. The test check was then deleted. A check only alerts after it has received at least one ping, so a new check must be sent one ping when it is created. |
+| Archive-stall alert tested (live server) | 2026-10-13, using `dbserver/archive-stall-test.sh`, with no application data in the database. WAL archiving was deliberately broken at 14:56:02 UK time. The watch raised the alert at 14:59:05 (3 min 3 s later, against a 3 minute limit); the "[DOWN] DBServer WAL archive freshness reported a failure" message arrived in the team Slack group at 14:59:05. Archiving was restored at 15:00:45 and the "[RECOVERED] ... is checking in again" message arrived at 15:00:52. All WAL queued during the stall was archived afterwards and `pgbackrest check` passed, so nothing was lost. |
 
 ## Outstanding before cutover
 
 - Done: disk encryption at rest confirmed in writing by AWS (see `tls-test-record.md`, section 5).
 - Done: TLS enforcement and verification details handed to the application (see `tls-test-record.md`).
 - Outbound IP observed and recorded (`tls-test-record.md`). Outbound TCP 444 to the DBS host is still to be tested, only when separately agreed.
-- Archive-stall alert: logic tested against a throwaway PostgreSQL 16 server (stalled, recovered, server down). The live-server test (`dbserver/archive-stall-test.sh`) is **pending**; the result and times will be added here.
+- Done: archive-stall alert tested on the live server (see the monitoring table above).
 - Re-time the restore with production-sized data.
