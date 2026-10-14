@@ -114,3 +114,10 @@ On the DB server, after `setup.sh`: `sudo bash dbserver/install-backup.sh` sets 
 ### PostgreSQL TLS
 
 `sudo bash dbserver/enable-tls.sh` creates a private CA and server certificate and turns TLS on. `... enforce` then rejects unencrypted remote connections (do this only after the application uses the CA certificate with `verify-full`), `... check` shows the state, and `... summary` prints the non-secret details to give the application.
+
+### Synthetic rehearsal (review material; nothing here runs without approval)
+
+- `dbserver/create-rehearsal-db.sh`: `plan` (default, changes nothing), `apply` and `cleanup` for an isolated empty database, its two roles and two TLS-only access lines on the database server. Refuses non-rehearsal names, the production database and application server.
+- `dbserver/verify-roles.sh`: read-only check of effective privileges (26 checks, including attempted DDL as each role inside rolled-back transactions).
+- `rehearsal/egress-plan.md`: host firewall plan for the temporary application host (outbound deny-by-default, IPv4 and IPv6).
+- `rehearsal/scratch-storage.md`: scratch backup bucket and the two limited IAM policies for the synthetic point-in-time test.
