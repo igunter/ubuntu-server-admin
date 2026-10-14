@@ -1,0 +1,18 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-everything",
+      "Status": "Enabled",
+      "Filter": {},
+      "Expiration": {
+        "Days": 7
+      },
+      "NoncurrentVersionExpiration": {
+        "NoncurrentDays": 1
+      },
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 1
+      }
+    }
+  ]
+}

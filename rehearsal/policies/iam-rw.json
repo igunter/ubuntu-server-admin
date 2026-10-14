@@ -1,0 +1,33 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListRehearsalBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": "arn:aws:s3:::dbs-check-crm-rehearsal-backups"
+    },
+    {
+      "Sid": "ObjectsInRehearsalBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": "arn:aws:s3:::dbs-check-crm-rehearsal-backups/*"
+    },
+    {
+      "Sid": "NeverTheLiveBucket",
+      "Effect": "Deny",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::dbs-check-crm-backups",
+        "arn:aws:s3:::dbs-check-crm-backups/*"
+      ]
+    }
+  ]
+}

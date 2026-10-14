@@ -121,3 +121,10 @@ On the DB server, after `setup.sh`: `sudo bash dbserver/install-backup.sh` sets 
 - `dbserver/verify-roles.sh`: read-only check of effective privileges (26 checks, including attempted DDL as each role inside rolled-back transactions).
 - `rehearsal/egress-plan.md`: host firewall plan for the temporary application host (outbound deny-by-default, IPv4 and IPv6).
 - `rehearsal/scratch-storage.md`: scratch backup bucket and the two limited IAM policies for the synthetic point-in-time test.
+
+## Rehearsal tooling (review material; nothing here is run without client approval)
+
+- `dbserver/create-rehearsal-db.sh`, `dbserver/verify-roles.sh`, `dbserver/rehearsal-common.sh`: the empty rehearsal database, its two roles and two TLS-only access lines, and their verification. See the header of each.
+- `rehearsal/egress-lockdown.sh` (+ `egress-sink.py`, `egress-probe.py`, `verify-session.sh`): application-host firewall and its verification.
+- `rehearsal/scratch-preflight.sh`, `check-policies.py`, `policies/`: fences and offline policy checks for the scratch backup test.
+- `rehearsal/REVIEW-RESPONSE.md`, `egress-plan.md`, `scratch-storage.md`, `MANIFEST.sha256`: what changed after review, the plans, and the file hashes.
