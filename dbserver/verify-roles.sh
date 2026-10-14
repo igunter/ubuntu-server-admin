@@ -284,27 +284,45 @@ SQL
 }
 
 # probe "description" ROLE "SQL" deny|allow
-# The role switch must be shown to have worked (ROLE=<name> is printed), and a denial must be SQLSTATE 42501.
+# One psql session per probe, with ON_ERROR_STOP on, so the FIRST error ends the script. Markers are printed
+# on stdout only if every earlier statement succeeded:
+#   ROLE=<name>  the role switch worked      READY  all setup statements (timeouts, role switch) succeeded
+#   DDL_OK       the DDL itself succeeded    DONE   the transaction was rolled back and the session finished normally
+# deny  : psql must exit 3 (script error), stderr must hold exactly one error, SQLSTATE 42501, and nothing else
+#         (no FATAL/PANIC); ROLE and READY must have been printed, so the error can only be the DDL statement.
+# allow : psql must exit 0, stderr must be empty, and ROLE, READY, DDL_OK and DONE must all have been printed,
+#         so a disconnection or FATAL after the role switch cannot pass.
+# A session that ends any other way (exit 1 or 2, FATAL, PANIC, missing markers) is a FAIL. The server rolls back
+# an unfinished transaction when the session ends, so nothing is left behind on any exit path.
 probe() {
-    local what=$1 role=$2 sql=$3 expect=$4 out nerr
-    out=$(pgw -d "$DB_NAME" 2>&1 <<SQL || true
-\\set ON_ERROR_STOP off
+    local what=$1 role=$2 sql=$3 expect=$4 out errf rc=0 err nerr
+    errf=$(mktemp)
+    out=$(pgw -d "$DB_NAME" 2>"$errf" <<SQL
 \\set VERBOSITY sqlstate
 BEGIN;
 SET LOCAL lock_timeout = '2s';
 SET LOCAL statement_timeout = '5s';
 SET LOCAL ROLE "$role";
 SELECT 'ROLE=' || current_user;
+SELECT 'READY';
 $sql;
+SELECT 'DDL_OK';
 ROLLBACK;
+SELECT 'DONE';
 SQL
-    )
-    if ! grep -qx "ROLE=$role" <<<"$out"; then printf 'FAIL\t%s (could not switch to role %s)\n' "$what" "$role"; return; fi
-    nerr=$(grep -c '^ERROR:' <<<"$out" || true)
+    ) || rc=$?
+    err=$(cat "$errf"); rm -f "$errf"
+    nerr=$(grep -c '^ERROR:' <<<"$err" || true)
+    if grep -qE '^(FATAL|PANIC):' <<<"$err" || grep -qE '(^|[^a-z])(FATAL|PANIC)' <<<"$err"; then printf 'FAIL\t%s (session reported FATAL/PANIC or disconnected)\n' "$what"; return; fi
+    if ! grep -qx "ROLE=$role" <<<"$out" || ! grep -qx 'READY' <<<"$out"; then printf 'FAIL\t%s (the role switch or setup did not complete: rc=%s)\n' "$what" "$rc"; return; fi
     if [[ $expect == deny ]]; then
-        if ((nerr == 1)) && grep -qx 'ERROR:  42501' <<<"$out"; then printf 'PASS\t%s (SQLSTATE 42501)\n' "$what"; else printf 'FAIL\t%s\n' "$what"; fi
+        if ((rc == 3 && nerr == 1)) && grep -qx 'ERROR:  42501' <<<"$err" && ! grep -qx 'DDL_OK' <<<"$out" && [[ $(grep -c . <<<"$err") == 1 ]]; then
+            printf 'PASS\t%s (SQLSTATE 42501)\n' "$what"
+        else printf 'FAIL\t%s (rc=%s, errors=%s)\n' "$what" "$rc" "$nerr"; fi
     else
-        if ((nerr == 0)); then printf 'PASS\t%s\n' "$what"; else printf 'FAIL\t%s\n' "$what"; fi
+        if ((rc == 0)) && [[ -z $err ]] && grep -qx 'DDL_OK' <<<"$out" && grep -qx 'DONE' <<<"$out"; then
+            printf 'PASS\t%s\n' "$what"
+        else printf 'FAIL\t%s (rc=%s, incomplete or errored)\n' "$what" "$rc"; fi
     fi
 }
 
@@ -323,7 +341,8 @@ main() {
     local out n expected_total mode_line
     if ((PROBES)); then
         local ev
-        ev=$(pg -c "SELECT count(*) FROM pg_event_trigger") || { err "Cannot read event triggers."; exit 1; }
+        # event triggers are DATABASE-LOCAL: look in the rehearsal database, not in postgres
+        ev=$(pg -d "$DB_NAME" -c "SELECT count(*) FROM pg_event_trigger") || { err "Cannot read event triggers."; exit 1; }
         [[ $ev == 0 ]] || { err "$ev event trigger(s) exist: a DDL probe could fire them. Refusing to run probes."; exit 1; }
         echo "The DDL probes are NOT read-only: they run CREATE statements inside transactions that are rolled back,"
         echo "taking locks and writing catalog/WAL activity, and may be recorded by audit logging."

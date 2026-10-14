@@ -1,0 +1,245 @@
+Regression run 2026-10-14T15:00:14Z  commit-base: 4d9439649295571d5324191dc6d79586db6caaf3  dirty-files: 14
+bash 5.2.21(1)-release; nftables v1.0.9 (Old Doc Yak #3); postgres (PostgreSQL) 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
+
+################ test-provisioning.sh
+== plan changes nothing
+  ok    plan exits 0
+  ok    plan shows the typed-confirmation SQL
+  ok    nothing created
+  ok    no credentials file
+== secret destination restrictions (F3)
+  ok    SECRET_FD refused
+  ok      and nothing created
+  ok    SECRET_OUT outside the reviewed directory refused
+  ok    SECRET_OUT in a subdirectory refused
+  ok    SECRET_OUT with .. refused
+  ok    SECRET_OUT with a space refused
+  ok    existing SECRET_OUT refused
+  ok    missing SECRET_OUT refused
+  ok    directory with mode 0755 refused
+  ok    nothing created by any refusal
+  ok    pg_hba.conf untouched by refusals
+== change exclusion must be typed
+  ok    wrong change-exclusion answer cancels
+  ok      nothing created
+== failed configuration inventory stops the run (F4: no empty loop)
+  ok    plan stops with a nonzero status
+  ok      and says why
+== a configuration file changing between plan and reload blocks the reload (F4)
+  ok    edit with a new mtime: run fails
+  ok      reload refused (modified after the last load)
+  ok      rollback reload also refused, and says so
+  ok      unreviewed setting was NOT activated
+  ok      database and roles rolled back
+  ok      credentials file kept (rollback incomplete) and is 0600
+  ok    edit with the mtime put back (mtime alone cannot see it): run fails
+  ok      reload refused by the content comparison
+  ok      unreviewed setting was NOT activated
+  ok      database and roles rolled back
+== candidate pg_hba.conf validation happens before install (F4)
+  ok    exact candidate accepted; extra line rejected; altered template line rejected
+== successful apply, then sentinel scan of every output (F3)
+  ok    apply exits 0
+  ok    database + 2 roles exist
+  ok    credentials file is root 0600
+  ok    pg_hba.conf has exactly our 2 new lines
+  ok    reload happened (rules visible to the server)
+  ok    neither generated password appears in terminal output, server log or pg_hba.conf
+  ok    no SCRAM verifier printed
+  ok    a second apply is refused (already exists)
+== cleanup, then an event-trigger-free end state
+  ok    cleanup exits 0
+  ok    everything removed
+  ok    pg_hba.conf back to the original
+
+RESULT: 41 passed, 0 failed
+exit status of test-provisioning.sh: 0
+
+################ test-verifier.sh
+== catalog-only run on the empty rehearsal database
+  ok    passes (rc 0)
+  ok    says catalog only
+  ok    ran no DDL (no probe lines)
+== probes: normal run
+  ok    all probes pass (rc 0)
+  ok    4 probe lines PASS
+  ok    deny lines cite SQLSTATE 42501
+  ok    nothing left behind by the probes
+  ok    wrong typed confirmation runs nothing
+== event trigger in the REHEARSAL database blocks probes although postgres has none (F1)
+  ok    postgres database has no event trigger
+  ok    created in rehearsal DB only
+  ok    probes refused (rc != 0)
+  ok      with the event-trigger message
+  ok      and no probe ran
+  ok    catalog-only mode is not blocked by the trigger (it runs no DDL)
+== probe() cannot be fooled by a session that dies or errors (F1)
+  ok    owner CREATE TABLE: allow passes
+  ok    runtime CREATE TABLE: deny passes (42501)
+  ok    backend killed mid-probe: allow FAILS (was a false PASS)
+  ok    backend killed by an outside terminate during a deny probe: FAILS
+  ok    owner statement errors with another SQLSTATE: allow FAILS
+  ok    deny with a non-42501 error (22012): FAILS
+  ok    deny where the statement unexpectedly succeeds: FAILS
+  ok    statement timeout (57014): allow FAILS
+  ok    role switch failure: FAILS
+  ok    owner statement raising 42501 where allowed: FAILS
+  ok    42501 raised by the intended denied statement: passes (SQLSTATE is the contract)
+  ok    no test object left behind
+
+RESULT: 26 passed, 0 failed
+exit status of test-verifier.sh: 0
+
+################ test-firewall.sh
+== setup: peers and long-lived connections BEFORE the lockdown
+  ok    before: operator session carries data both ways
+  ok    before: unapproved inbound session receives pushed data
+  ok    before: app-started outbound connection reaches the sink
+== plan changes nothing and shows scope
+  ok    plan exits 0
+  ok    no table loaded by plan
+  ok    plan lists exceptions as not loaded by default
+  ok    plan reports the IPv6 posture
+  ok    rules: no unconditional established-reply accept in either chain
+  ok    rules: no DHCP/ND/ICMP rule by default
+  ok    plan with all three exceptions passes nft -c
+  ok    exception rules name interface vA, server and peers
+  ok    unknown exception name refused
+== apply that fails to enable persistence fails closed
+  ok    apply exits non-zero
+  ok      says the rules remain loaded and persistence is NOT established
+  ok      rules ARE loaded (fail closed)
+  ok      no state record written
+  ok      status fails
+  ok      require fails
+== a clean apply, then status and require pass
+  ok    apply exits 0
+  ok    state record, rules file and unit file exist
+  ok    rules file is mode 600, state is mode 600
+  ok    status passes
+  ok    require passes (silent)
+== connections that were open before the lockdown
+    (ops.log 13 -> 19, app22.log 13 -> 19)
+  ok    operator session still works both ways
+  ok    UNAPPROVED inbound session receives nothing more (no replies/queued pushes leak)
+  ok    app-started connection to the sink delivers nothing more
+    (appdb.log 19 -> 30, db.log 19 -> 30)
+  ok    app-started connection to the database continues both ways
+  ok    output drop counter rose (the blocked pushes were counted)
+== probes (as blocked) and drops
+  ok    probe: all outbound blocked, database reachable
+  ok    probe covers tcp 443, tcp 444 and udp 5353 (IPv4)
+  ok    probe covers IPv6 tcp 444 or states IPv6 state
+  ok    the sink logged no hit from the app host
+  ok    a NEW inbound connection from the unapproved peer is dropped
+== probe: IPv6 state is evidence, not an assumption (F5)
+  ok    probe IPv6 state: disabled by sysctl, nothing but lo
+  ok    probe IPv6 state: kernel without IPv6
+  ok    probe IPv6 state: enabled, link-local only (no global address)
+  ok    probe IPv6 state: sysctl all=1 but default=0
+  ok    probe IPv6 state: disabled but an address remains
+== tampering is detected
+  ok    edited rules file: status fails
+  ok    edited rules file: require fails
+  ok    edited unit file: require fails
+  ok    rule added by hand: require fails
+  ok    re-apply restores a passing state
+  ok    unit not enabled: require fails
+== legacy timer inventory
+  ok    fw-rollback timer present: status FAILS
+  ok      and names it
+  ok    systemctl inventory command fails: status FAILS (was a false PASS)
+  ok      and says the inventory is not confirmed
+  ok      require fails too
+  ok    back to passing once the inventory works
+== cannot be weakened or re-applied under secrets or a running app
+  ok    remove refused with the secrets file present
+  ok      table still loaded
+  ok    apply refused with the secrets file present
+  ok    remove refused while the app unit is active
+  ok    remove refused while a process runs as SVC_USER
+Terminated
+  ok    remove works on the empty host
+  ok      table gone and files removed
+== exceptions load only when approved, scoped to the interface and peers
+  ok    apply with dhcp,icmp-related
+  ok    DHCP rule is bound to vA and the named server
+  ok    no ND rule (not approved)
+  ok    require passes with exceptions loaded
+kernel IPv6 available in this test environment: no (IPv6 rules are syntax-checked by nft -c; behaviour needs the real host)
+
+RESULT: 61 passed, 0 failed
+exit status of test-firewall.sh: 0
+
+################ test-scratch.sh
+== happy path: source-install
+  ok    exit 0
+  ok    apt, conf, ALTER SYSTEM x4, restart, stanza-create, check, full backup — in that order
+  ok    conf names only the scratch bucket, mode 600, postgres-owned
+  ok    the pgBackRest commands carry no secret (config file only)
+  ok    no secret or passphrase was printed to the terminal (sentinel scan)
+  ok    no cron file, monitor or alert env was created
+  ok    the old live-capable scripts are not invoked
+  ok    no prompt generates or prints a passphrase
+== guard refusals: nothing is called (source-install)
+  ok    wrong hostname
+  ok    machine-id differs (identity copied from elsewhere)
+  ok    protected live address present
+  ok    protected app address present
+  ok    protected fixed outbound address present
+  ok    PING_URL set (even empty) in the environment
+  ok    ARCHIVE_PING_URL set in the environment
+  ok    alert.env defines a ping URL
+  ok    cron file from the live installer exists
+  ok    existing conf names the live bucket
+  ok    existing conf has a second, different bucket
+  ok    existing conf is mode 644
+  ok    running server: archive_mode query FAILS (was treated as not-live)
+  ok    source with archive_mode=always
+  ok    source listens beyond localhost
+  ok    source has a remote pg_hba rule (HBA is inspected)
+  ok    cluster holds dbscheckcrm
+  ok    running cluster's data directory differs from the identity
+== identity file refusals
+  ok    identity names the LIVE bucket
+  ok    identity file mode 0644
+  ok    identity file missing
+  ok    identity file with an unknown key
+  ok    identity role is restore but the step is source
+  ok    identity region not eu-west-2
+== bucket/region are never taken from the environment
+  ok    BUCKET=live in the environment is ignored; conf still names the scratch bucket
+== credentials file restrictions
+  ok    mode 0644 refused, nothing called
+  ok    a ping URL line in the credentials file refused
+  ok    passphrase under 24 characters refused
+  ok    symlinked credentials file refused
+  ok    shell syntax in a value is refused and never executed
+  ok    secret directory mode 0755 refused
+== the guard is re-run before each step (drift mid-run)
+  ok    hostname changes after the package step: run stops
+  ok      conf was NOT written and no WAL/restart/backup call followed
+  ok    cron file appears after the restart: stanza-create/backup NOT run
+== confirmation is typed
+  ok    wrong confirmation: nothing called
+== restore host
+  ok    restored settings say archive_mode off: cluster started, exit 0
+  ok    restore used --archive-mode=off and the read-only credentials; no secret in any argument or output
+  ok    listen_addresses forced to localhost in the restored settings
+  ok    restored settings say archive_mode on: cluster NOT started
+  ok    the LAST archive_mode line wins (off then always): NOT started
+  ok    restored settings absent/unset: NOT started
+  ok    restore host with archive_mode=on refused before anything
+  ok    restore host: archive_mode query failure refused
+  ok    invalid restore time refused, nothing called
+  ok    restore does not fall back to the read-write credentials
+  ok    guard re-run before and after start: drift after start flagged
+== tracing is refused before any secret is read
+  ok    bash -x refused
+  ok      and printed no sentinel
+  ok    SHELLOPTS=xtrace refused
+
+RESULT: 57 passed, 0 failed
+exit status of test-scratch.sh: 0
+
+ALL SUITES PASSED

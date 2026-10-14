@@ -126,5 +126,6 @@ On the DB server, after `setup.sh`: `sudo bash dbserver/install-backup.sh` sets 
 
 - `dbserver/create-rehearsal-db.sh`, `dbserver/verify-roles.sh`, `dbserver/rehearsal-common.sh`: the empty rehearsal database, its two roles and two TLS-only access lines, and their verification. See the header of each.
 - `rehearsal/egress-lockdown.sh` (+ `egress-sink.py`, `egress-probe.py`, `verify-session.sh`): application-host firewall and its verification.
-- `rehearsal/scratch-preflight.sh`, `check-policies.py`, `policies/`: fences and offline policy checks for the scratch backup test.
-- `rehearsal/REVIEW-RESPONSE.md`, `egress-plan.md`, `scratch-storage.md`, `MANIFEST.sha256`: what changed after review, the plans, and the file hashes.
+- `rehearsal/scratch/scratch-pitr.sh`: the guarded entrypoint for the scratch point-in-time test (replaces use of `install-backup.sh`/`restore-test*.sh` on the scratch hosts). `rehearsal/check-policies.py`, `policies/`: offline policy checks; `scratch-preflight.sh` is a read-only report.
+- `rehearsal/tests/`: regression suites and their transcript (`sudo bash rehearsal/tests/run-all.sh`), run on throwaway local resources only.
+- `rehearsal/REVIEW-RESPONSE.md`, `REVIEW-RESPONSE-2.md`, `egress-plan.md`, `scratch-storage.md`, `MANIFEST.sha256`: what changed after review, the plans, and the file hashes.

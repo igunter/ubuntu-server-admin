@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Hard stops for the scratch PITR hosts. Run BEFORE the reused backup scripts, and again after them. This script is
+# SUPERSEDED as the safeguard by rehearsal/scratch/scratch-pitr.sh, whose guard is inside the entrypoint and re-runs before every step.
+# Kept only as a read-only report. Hard stops for the scratch PITR hosts. Originally run BEFORE the reused backup scripts. This script is
 # new; the reused scripts (dbserver/install-backup.sh, restore-test-prepare.sh, restore-test.sh) are NOT modified
 # and have no guard of their own against the live bucket, so this is the guard.
 #

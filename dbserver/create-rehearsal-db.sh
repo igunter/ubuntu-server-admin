@@ -14,7 +14,7 @@
 #   OWNER_CONN_LIMIT (default 5), APP_CONN_LIMIT (default 24): integers 1-100
 #   DB_SERVER_IP  default 172.26.9.114: this script refuses to run on a machine that does not have it
 #   PG_PORT       default 5432, PG_HOST default /var/run/postgresql (the cluster that is contacted is pinned)
-#   SECRET_OUT / SECRET_FD   where `apply` puts the generated passwords (see below)
+#   SECRET_OUT    where `apply` puts the generated passwords: /root/rehearsal-secrets/<name> (see below)
 #
 # What `apply` does, and nothing more
 #   1. CREATE ROLE x2 (LOGIN, no superuser/createdb/createrole/replication/bypassrls, connection limits)
@@ -34,18 +34,24 @@
 # Passwords
 #   Generated here, never printed, never put in a command line. The server receives only a SCRAM-SHA-256
 #   verifier (computed locally), so the plain password cannot appear in a CREATE ROLE statement, an
-#   error message, or a statement log. The plain passwords are written once to a protected destination
-#   you name BEFORE anything is created:
-#     SECRET_OUT=/path/file   a new file (must not exist) in a root-owned 0700 directory; created mode 0600
-#     SECRET_FD=N             an already-open descriptor (for example from your secret manager's stdin)
-#   Move them through the agreed secure channel, then delete the file (shred -u).
+#   error message, or a statement log (a statement log would hold the salted verifier, which is also
+#   sensitive: keep the database and audit logs protected). The plain passwords are written once, BEFORE
+#   anything is created, to a NEW file named by SECRET_OUT, and ONLY inside the reviewed directory
+#   /root/rehearsal-secrets, which must be root-owned with mode 0700 (the file is created mode 0600).
+#   Arbitrary file descriptors are NOT accepted: a descriptor can point at a log collector or a readable
+#   file. Move the passwords through the agreed secure channel, then delete the file (shred -u).
 #
 # Safeguards: refuses if the database or either role already exists, if a name does not contain
 # "rehearsal", if a name is a protected production name, if HOST_IP is not a private address or is the
 # production application server, if shell tracing is on, if a query fails (a failed query is never
 # read as "does not exist"), if pg_hba.conf has errors, if configuration files changed since the last
-# reload (a reload would activate someone else's unreviewed change), or if any existing rule could
-# already match the new database/roles from HOST_IP. `cleanup` refuses any object that lacks this
+# reload (a reload would activate someone else's unreviewed change; checked again immediately before EVERY
+# reload, including rollback and cleanup, against a snapshot taken at the start), or if any existing rule
+# could already match the new database/roles from HOST_IP. The candidate pg_hba.conf is proven to be the
+# existing file plus exactly the two template lines BEFORE it is installed. A typed confirmation records
+# that nobody else is changing this server's PostgreSQL configuration during the run: the script's own
+# lock only stops two copies of this script, and a timestamp/hash check cannot stop a concurrent edit
+# that happens a moment later, so the change exclusion is an operator commitment, not something code can prove. `cleanup` refuses any object that lacks this
 # script's provenance comment.
 set -euo pipefail
 DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -66,7 +72,8 @@ TAG='crm-rehearsal synthetic; created by dbserver/create-rehearsal-db.sh'
 
 # What this run has created, so a failure can undo exactly that and nothing else.
 CREATED_OWNER=0; CREATED_APP=0; CREATED_DB=0; HBA_ADDED=0
-SECRET_FD=${SECRET_FD:-}
+SECRET_DIR=/root/rehearsal-secrets   # fixed on purpose: not an environment setting
+SNAP_INV=
 
 pg() { $PG_RUN env "PGHOST=$PG_HOST" "PGPORT=$PG_PORT" PGDATABASE=postgres psql -v ON_ERROR_STOP=1 -X -Atq "$@"; }
 ask() { local v=; read -rp "$1${3:+ [$3]}: " v || true; printf -v "$2" '%s' "${v:-${3:-}}"; }
@@ -137,25 +144,55 @@ connect_checks() {
     [[ -f $HBA && -w $HBA ]] || { err "pg_hba.conf ($HBA, reported by the server) is missing or not writable."; exit 1; }
 }
 
-# Configuration files changed after the server last loaded them: a reload would activate changes this
-# script has not been asked to make. Stop rather than activate them.
+# The server's configuration files (main file, includes, auto.conf, ident file). pg_hba.conf is handled separately.
+conf_file_list() {
+    pg -c "SELECT DISTINCT f FROM (
+             SELECT current_setting('config_file') AS f UNION ALL SELECT current_setting('ident_file')
+             UNION ALL SELECT current_setting('data_directory') || '/postgresql.auto.conf'
+             UNION ALL SELECT sourcefile FROM pg_file_settings WHERE sourcefile IS NOT NULL) t
+           WHERE f IS NOT NULL AND f <> current_setting('hba_file') ORDER BY f"
+}
+
+# sha256 of every configuration file except pg_hba.conf. Status is checked; a failed query is a failure.
+config_inventory() {
+    local files f
+    files=$(conf_file_list) || { err "Could not list the server's configuration files."; return 1; }
+    [[ -n $files ]] || { err "The server reported no configuration files."; return 1; }
+    while IFS= read -r f; do
+        if [[ -e $f ]]; then printf '%s  %s\n' "$(sha256sum < "$f" | cut -d' ' -f1)" "$f"; else printf 'absent  %s\n' "$f"; fi
+    done <<<"$files"
+}
+
+# Files modified after the server last loaded its configuration: a reload would activate changes nobody asked for.
+# check_no_unloaded_changes 1  also covers pg_hba.conf (before we touch it); 0 leaves it out (after we replaced it).
 check_no_unloaded_changes() {
-    local loaded f mt changed=()
-    loaded=$(pg -c "SELECT extract(epoch FROM pg_conf_load_time())") || { err "Cannot read the configuration load time."; exit 1; }
+    local with_hba=${1:-1} loaded files f mt changed=()
+    loaded=$(pg -c "SELECT extract(epoch FROM pg_conf_load_time())") || { err "Cannot read the configuration load time."; return 1; }
+    files=$(conf_file_list) || { err "Could not list the server's configuration files."; return 1; }
+    [[ $with_hba == 1 ]] && files+=$'\n'"$HBA"
     while IFS= read -r f; do
         [[ -n $f && -e $f ]] || continue
-        mt=$(find "$f" -maxdepth 0 -printf '%T@')
+        mt=$(find "$f" -maxdepth 0 -printf '%T@') || { err "Cannot read the modification time of $f."; return 1; }
         if awk -v m="$mt" -v l="$loaded" 'BEGIN { exit !(m > l) }'; then changed+=("$f"); fi
-    done < <(pg -c "SELECT DISTINCT f FROM (
-                      SELECT current_setting('config_file') AS f UNION ALL SELECT current_setting('hba_file')
-                      UNION ALL SELECT current_setting('ident_file') UNION ALL SELECT current_setting('data_directory') || '/postgresql.auto.conf'
-                      UNION ALL SELECT sourcefile FROM pg_file_settings WHERE sourcefile IS NOT NULL) t WHERE f IS NOT NULL")
+    done <<<"$files"
     if ((${#changed[@]})); then
         err "These configuration files were modified after the server last loaded its configuration:"
         printf '    %s\n' "${changed[@]}" >&2
         err "A reload would activate those changes too. Review them (and reload deliberately) before running this script."
-        exit 1
+        return 1
     fi
+}
+
+# Run immediately before EVERY reload (apply, rollback, cleanup). $1 = the sha256 pg_hba.conf must have right now.
+reload_guard() {
+    local want_hba=$1 inv n
+    [[ $(hba_sha) == "$want_hba" ]] || { err "pg_hba.conf is not the file this script installed (changed by someone else?). Not reloading."; return 1; }
+    check_no_unloaded_changes 0 || return 1
+    inv=$(config_inventory) || return 1
+    [[ $inv == "$SNAP_INV" ]] || { err "A configuration file's content changed since this run started. Not reloading."; diff <(echo "$SNAP_INV") <(echo "$inv") | sed 's/^/    /' >&2 || true; return 1; }
+    n=$(pg -c "SELECT count(*) FROM pg_file_settings WHERE error IS NOT NULL") || { err "Cannot read pg_file_settings. Not reloading."; return 1; }
+    [[ $n == 0 ]] || { err "$n configuration entr(ies) have errors (pg_file_settings). Not reloading."; return 1; }
+    [[ $(hba_error_count) == 0 ]] || { err "pg_hba.conf already has parse errors. Not reloading."; return 1; }
 }
 
 hba_error_count() { pg -c "SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL"; }
@@ -199,6 +236,26 @@ hba_our_line_count() {
         END { print n + 0 }' "$HBA"
 }
 
+# Prove, BEFORE installing, that candidate $1 is exactly the current file plus (add) or minus (remove) our two
+# template lines, and that nothing else differs. The existing file had zero parse errors (checked), and our lines
+# come from a fixed template with validated names and address, so the candidate is valid by construction.
+# PostgreSQL has no offline pg_hba parser; if a reload nevertheless found an error it would keep the previous rules.
+hba_validate_candidate() {
+    local cand=$1 mode=$2 want
+    case $mode in
+        add)
+            want=$(cat "$HBA"; [[ -z $(tail -c1 "$HBA") ]] || printf '\n'; hba_lines)
+            [[ $(cat "$cand") == "$want" ]] || { err "Candidate pg_hba.conf is not the current file plus exactly the two intended lines."; return 1; }
+            [[ $(tail -n 2 "$cand" | grep -cE "^hostssl[[:space:]]+$DB_NAME[[:space:]]+($OWNER_ROLE|$APP_ROLE)[[:space:]]+$HOST_IP/32[[:space:]]+scram-sha-256\$") == 2 ]] \
+                || { err "The two appended lines do not match the template."; return 1; } ;;
+        remove)
+            [[ $(( $(grep -c '' "$HBA") - $(grep -c '' "$cand") )) == "$(hba_our_line_count)" ]] || { err "Candidate removes a different number of lines than ours."; return 1; }
+            [[ $(grep -vxFf "$cand" "$HBA" | awk -v db="$DB_NAME" -v o="$OWNER_ROLE" -v a="$APP_ROLE" -v ip="$HOST_IP/32" \
+                  'NF == 5 && $1 == "hostssl" && $2 == db && ($3 == o || $3 == a) && $4 == ip && $5 == "scram-sha-256" { n++ } END { print n + 0 }') == "$(hba_our_line_count)" ]] \
+                || { err "Candidate removes something other than our exact lines."; return 1; } ;;
+    esac
+}
+
 # Replace pg_hba.conf atomically with $1, only if it has not changed since $2 (its sha256).
 hba_install() {
     local cand=$1 expect=$2
@@ -226,35 +283,27 @@ hba_candidate_remove() {   # copy with only our exact lines removed
     echo "$cand"
 }
 
+# reload_conf EXPECTED_HBA_SHA: guard first, then reload. Every reload in this script goes through here.
 reload_conf() {
+    reload_guard "$1" || return 1
     [[ $(pg -c "SELECT pg_reload_conf()") == t ]] || { err "pg_reload_conf() did not report success."; return 1; }
     sleep 1
 }
 
 # ---- credential handoff: validated before anything is created ----
+# Only a NEW file inside the reviewed directory $SECRET_DIR (root-owned, mode 0700). No descriptors, no other paths.
 secret_sink_check() {
-    if [[ -n $SECRET_FD && -n ${SECRET_OUT:-} ]]; then err "Set SECRET_FD or SECRET_OUT, not both."; return 1; fi
-    if [[ -n $SECRET_FD ]]; then
-        [[ $SECRET_FD =~ ^([3-9]|[1-9][0-9])$ ]] || { err "SECRET_FD must be an open descriptor number of 3 or more."; return 1; }
-        [[ -e /proc/self/fd/$SECRET_FD ]] || { err "SECRET_FD $SECRET_FD is not open."; return 1; }
-        [[ ! -t $SECRET_FD ]] || { err "SECRET_FD $SECRET_FD is a terminal. Passwords are never shown on screen."; return 1; }
-        local t o e
-        t=$(readlink "/proc/self/fd/$SECRET_FD") || t=
-        o=$(readlink /proc/self/fd/1) || o=
-        e=$(readlink /proc/self/fd/2) || e=
-        [[ -n $t && $t != "$o" && $t != "$e" ]] || { err "SECRET_FD points at the same place as stdout or stderr. Refusing."; return 1; }
-        return 0
-    fi
-    [[ -n ${SECRET_OUT:-} ]] || { err "Set SECRET_OUT=/root/<private dir>/file (or SECRET_FD=N). Passwords are never printed to the terminal."; return 1; }
+    [[ -n ${SECRET_OUT:-} ]] || { err "Set SECRET_OUT=$SECRET_DIR/<file name>. Passwords are never printed to the terminal."; return 1; }
+    [[ -z ${SECRET_FD:-} ]] || { err "SECRET_FD is not accepted: a descriptor can point at a log collector or a readable file. Use SECRET_OUT."; return 1; }
     [[ $SECRET_OUT == /* && $SECRET_OUT != *..* ]] || { err "SECRET_OUT must be an absolute path without '..'."; return 1; }
-    local d; d=$(dirname "$SECRET_OUT")
-    [[ -d $d && ! -L $d ]] || { err "$d must be an existing directory (not a symlink)."; return 1; }
-    [[ $(stat -c '%u %a' "$d") == "0 700" ]] || { err "$d must be owned by root with mode 0700 (it is $(stat -c '%U %a' "$d"))."; return 1; }
+    [[ $(dirname "$SECRET_OUT") == "$SECRET_DIR" ]] || { err "SECRET_OUT must be directly inside $SECRET_DIR (the reviewed secret directory)."; return 1; }
+    [[ $(basename "$SECRET_OUT") =~ ^[A-Za-z0-9._-]{1,64}$ ]] || { err "SECRET_OUT's file name may use only letters, digits, dot, underscore and hyphen."; return 1; }
+    [[ -d $SECRET_DIR && ! -L $SECRET_DIR ]] || { err "$SECRET_DIR must be an existing directory (not a symlink)."; return 1; }
+    [[ $(stat -c '%u %a' "$SECRET_DIR") == "0 700" ]] || { err "$SECRET_DIR must be owned by root with mode 0700 (it is $(stat -c '%U %a' "$SECRET_DIR"))."; return 1; }
     [[ ! -e $SECRET_OUT && ! -L $SECRET_OUT ]] || { err "$SECRET_OUT already exists. Refusing to overwrite or reuse it."; return 1; }
 }
 
 secret_sink_open() {
-    [[ -z $SECRET_FD ]] || return 0
     ( umask 077; set -o noclobber; : > "$SECRET_OUT" ) || { err "Could not create $SECRET_OUT."; return 1; }
     [[ $(stat -c '%u %a' "$SECRET_OUT") == "0 600" ]] || { err "$SECRET_OUT does not have mode 0600 owned by root."; return 1; }
     exec 8>>"$SECRET_OUT"
@@ -265,7 +314,7 @@ secret_sink_open() {
 # If the run stops before anything was written, do not leave an empty credentials file behind.
 secret_sink_tidy() { if [[ -n ${SECRET_OUT:-} && -e $SECRET_OUT && ! -s $SECRET_OUT ]]; then rm -f "$SECRET_OUT"; fi; }
 
-secret_sink_where() { if [[ -n ${SECRET_OUT:-} ]]; then echo "file $SECRET_OUT (0600)"; else echo "descriptor $SECRET_FD"; fi; }
+secret_sink_where() { echo "file $SECRET_OUT (0600)"; }
 
 # ---- the exact SQL; printed in `plan` and run by `apply` ----
 stage2_sql() {   # run inside the new database
@@ -314,6 +363,16 @@ prechecks() {
     PRE_MATCHES=$(hba_possible_matches) || { err "Cannot evaluate existing access rules."; exit 1; }
     PRE_OURS=$(hba_our_line_count)
     PRE_SHA=$(hba_sha)
+    SNAP_INV=$(config_inventory) || exit 1
+}
+
+# The operator's commitment that nothing else changes this server's PostgreSQL configuration during the run.
+change_exclusion() {
+    local c
+    echo "Change exclusion: while this runs, nobody else may edit or reload this server's PostgreSQL configuration."
+    echo "(This script checks for changes immediately before each reload, but it cannot stop one that happens a moment later.)"
+    read -rp "Type NO-OTHER-CHANGES to confirm: " c || c=
+    [[ $c == NO-OTHER-CHANGES ]] || { echo "Cancelled. Nothing changed."; exit 0; }
 }
 
 cmd_plan() {
@@ -340,7 +399,7 @@ cmd_plan() {
     echo "  existing rules that could already match this database/roles from $HOST_IP (apply needs none):"
     if [[ -n $PRE_MATCHES ]]; then sed 's/^/    /' <<<"$PRE_MATCHES"; else echo "    none"; fi
     echo
-    echo "Credential handoff: $(if [[ -n ${SECRET_OUT:-}${SECRET_FD:-} ]]; then secret_sink_where; else echo "NOT SET (apply refuses until SECRET_OUT or SECRET_FD is set)"; fi)"
+    echo "Credential handoff: $(if [[ -n ${SECRET_OUT:-} ]]; then secret_sink_where; else echo "NOT SET (apply refuses until SECRET_OUT=$SECRET_DIR/<name> is set)"; fi)"
     echo "  Passwords are never printed. The server receives only SCRAM-SHA-256 verifiers."
     echo
     echo "Step 1, three separate statements in the postgres database (verifier computed locally at apply time):"
@@ -375,10 +434,13 @@ cmd_plan() {
 ROLLBACK_OK=1
 rollback_partial() {
     warn "Undoing what this run created (and nothing else)..."
-    local cand sha
+    local cand sha csha
     if ((HBA_ADDED)); then
         sha=$(hba_sha); cand=$(hba_candidate_remove)
-        if hba_install "$cand" "$sha" && reload_conf; then warn "  removed the two access lines"; HBA_ADDED=0
+        if hba_validate_candidate "$cand" remove && csha=$(sha256sum < "$cand" | cut -d' ' -f1) && hba_install "$cand" "$sha"; then
+            HBA_ADDED=0
+            if reload_conf "$csha"; then warn "  removed the two access lines"
+            else warn "  the two lines were removed from the FILE but the reload was refused: reload deliberately after checking the configuration."; ROLLBACK_OK=0; fi
         else warn "  COULD NOT remove the access lines automatically. Check pg_hba.conf by hand."; ROLLBACK_OK=0; fi
     fi
     if ((CREATED_DB)); then
@@ -396,8 +458,7 @@ fail_apply() {
     rollback_partial
     if ((ROLLBACK_OK)); then
         # Everything this run created is gone, so the passwords it saved belong to nothing.
-        if [[ -n ${SECRET_OUT:-} && -e $SECRET_OUT ]]; then shred -u "$SECRET_OUT" 2>/dev/null || rm -f "$SECRET_OUT"; err "Removed the credentials file $SECRET_OUT (it described objects that no longer exist)."
-        else err "Credentials written to $(secret_sink_where) described objects that no longer exist: discard them."; fi
+        if [[ -e $SECRET_OUT ]]; then shred -u "$SECRET_OUT" 2>/dev/null || rm -f "$SECRET_OUT"; err "Removed the credentials file $SECRET_OUT (it described objects that no longer exist)."; fi
     else
         err "Some objects could NOT be undone. Credentials in $(secret_sink_where) are still valid for them: handle that file as a secret."
     fi
@@ -432,7 +493,7 @@ SQL
 }
 
 cmd_apply() {
-    local c run pw_o pw_a v_o v_a before cand
+    local c run pw_o pw_a v_o v_a before cand csha
     [[ $DB_EXISTS == no ]] || { err "Database $DB_NAME already exists. Refusing (it must be new and empty)."; exit 1; }
     [[ $OWNER_EXISTS == no ]] || { err "Role $OWNER_ROLE already exists. Refusing."; exit 1; }
     [[ $APP_EXISTS == no ]] || { err "Role $APP_ROLE already exists. Refusing."; exit 1; }
@@ -443,13 +504,14 @@ cmd_apply() {
         err "Review them first: this script will not add rules that could be shadowed or that duplicate broader access."; exit 1
     fi
     secret_sink_check || exit 1
-    check_no_unloaded_changes
+    check_no_unloaded_changes 1 || exit 1
 
     exec 7>"$LOCK_FILE"
     flock -n 7 || { err "Another run of this script holds $LOCK_FILE."; exit 1; }
 
     cmd_plan
     echo
+    change_exclusion
     read -rp "Type CREATE $DB_NAME to make exactly these changes: " c || c=
     [[ $c == "CREATE $DB_NAME" ]] || { echo "Cancelled. Nothing changed."; exit 0; }
 
@@ -484,9 +546,11 @@ cmd_apply() {
     [[ $(hba_sha) == "$PRE_SHA" ]] || fail_apply "pg_hba.conf changed after the plan was shown. Nothing was written to it."
     cp -p "$HBA" "$HBA.bak.$(date +%Y%m%d%H%M%S)"
     cand=$(hba_candidate_add)
+    hba_validate_candidate "$cand" add || { rm -f "$cand"; fail_apply "The candidate pg_hba.conf failed validation. Nothing was written to it."; }
+    csha=$(sha256sum < "$cand" | cut -d' ' -f1)
     hba_install "$cand" "$PRE_SHA" || fail_apply "Could not install the new pg_hba.conf."
     HBA_ADDED=1
-    reload_conf || fail_apply "Reload failed."
+    reload_conf "$csha" || fail_apply "Reload refused or failed."
     hba_verify_after "$before" || fail_apply "pg_hba.conf verification failed."
     ok "Access lines accepted by PostgreSQL: valid, TLS-only, one per role, each the first matching rule for $HOST_IP/32; earlier rules untouched."
 
@@ -502,7 +566,7 @@ cmd_apply() {
 }
 
 cmd_cleanup() {
-    local c n=0 conns ours cand sha before after
+    local c n=0 conns ours cand sha before after csha
     info "CLEANUP of the rehearsal resources this script created. Nothing else."
     local have_db=$DB_EXISTS have_o=$OWNER_EXISTS have_a=$APP_EXISTS
     if [[ $have_db == yes ]]; then
@@ -523,9 +587,10 @@ cmd_cleanup() {
     echo "This will run (terminating only connections made by those two roles; no FORCE, no CASCADE):"
     cleanup_sql | sed 's/^/    /'
     echo "and remove exactly those access lines from pg_hba.conf (atomic replace; other lines untouched), then reload."
-    check_no_unloaded_changes
+    check_no_unloaded_changes 1 || exit 1
     exec 7>"$LOCK_FILE"
     flock -n 7 || { err "Another run of this script holds $LOCK_FILE."; exit 1; }
+    change_exclusion
     read -rp "Type DELETE $DB_NAME to confirm (this removes the database and its data): " c || c=
     [[ $c == "DELETE $DB_NAME" ]] || { echo "Cancelled. Nothing changed."; exit 0; }
 
@@ -541,8 +606,10 @@ cmd_cleanup() {
         before=$(hba_snapshot)
         sha=$(hba_sha); cp -p "$HBA" "$HBA.bak.$(date +%Y%m%d%H%M%S)"
         cand=$(hba_candidate_remove)
+        hba_validate_candidate "$cand" remove || { rm -f "$cand"; exit 1; }
+        csha=$(sha256sum < "$cand" | cut -d' ' -f1)
         hba_install "$cand" "$sha" || exit 1
-        reload_conf || exit 1
+        reload_conf "$csha" || { err "The lines were removed from the FILE but the reload was refused. Reload deliberately after checking the configuration."; exit 1; }
         after=$(hba_snapshot)
         [[ $(( $(grep -c '' <<<"$before") - $(grep -c '' <<<"$after") )) == "$ours" ]] || { err "Unexpected number of rules removed. Compare pg_hba.conf with the backup next to it."; exit 1; }
     fi
@@ -562,8 +629,8 @@ main() {
     connect_checks
     prechecks
     case $mode in
-        plan)    if [[ -n ${SECRET_OUT:-}${SECRET_FD:-} ]]; then secret_sink_check || exit 1; fi
-                 check_no_unloaded_changes
+        plan)    if [[ -n ${SECRET_OUT:-} ]]; then secret_sink_check || exit 1; fi
+                 check_no_unloaded_changes 1 || exit 1
                  cmd_plan ;;
         apply)   cmd_apply ;;
         cleanup) cmd_cleanup ;;

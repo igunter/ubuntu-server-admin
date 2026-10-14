@@ -27,26 +27,45 @@ have to be inspected and recorded.
 The earlier step "list the live bucket with the rw key and expect AccessDenied" is **removed**: even an expected refusal contacts a
 live resource. Instead: (1) the offline check above passes; (2) the created policies, bucket policy and effective principals are
 exported and compared with the files; (3) bucket region, Block Public Access, default encryption and the TLS-only policy are recorded;
-(4) after approval, bounded read/write/deny tests touch **only the scratch bucket** from the scratch hosts: with the read-only key a
+(4) after approval, bounded read/write/deny tests touch **only the scratch bucket** from the scratch hosts, before any backup: with the read-only key a
 write returns AccessDenied (if it unexpectedly succeeds, stop and clean up the synthetic object under the approved cleanup);
 (5) the passphrase for this rehearsal is different from the live one and is stored with the operator's other secrets. The application host gets no S3 access.
 
-## Scripts reused on scratch hosts, and how they are fenced
+## Scratch scripts: one guarded entrypoint (replaces the reused scripts)
 
-`dbserver/install-backup.sh`, `restore-test-prepare.sh` and `restore-test.sh` are **unmodified** (hashes in `MANIFEST.sha256`). They source
-`lib.sh`, using only its `info`, `ok`, `warn`, `err` helpers and colour constants. They have **no guard of their own** against the
-live bucket, so `rehearsal/scratch-preflight.sh` is run before and after (`source`, `restore`, `verify-config`): exact scratch host
-name, bucket equals the scratch name and not the live one, `eu-west-2`, no ping URL anywhere, localhost-only PostgreSQL on the source,
-`archive_mode` off on the restore host, and the written `pgbackrest.conf` names only the scratch bucket.
+`dbserver/install-backup.sh`, `restore-test-prepare.sh` and `restore-test.sh` are **not to be run on the scratch hosts**. They are
+unmodified, have no scratch guard, prompt for the bucket and region, install cron jobs and alert hooks, and (the installer) can print a
+generated passphrase. Their hashes stay in `MANIFEST.sha256` only because they are the live scripts under review elsewhere.
 
-Findings from reading them: `install-backup.sh` with blank ping URLs makes no alert-service call (the monitor and watch scripts only
-`curl` when a URL is set), but it **installs cron jobs** (hourly monitor, minute watch, backups) on the scratch host. It **prints a generated
-passphrase once** to the terminal: on the scratch source answer `n` to "Generate a random passphrase?" and type a passphrase from the
-operator's secret manager instead, so nothing is printed. `restore-test-prepare.sh` writes marker rows with microsecond timestamps and a
-later `heartbeat` commit, so a restore target always has a commit after it (the earlier fault where the target landed before the last
-commit cannot recur). `restore-test.sh` refuses if `archive_mode` is on and restores with `--archive-mode=off`.
+`rehearsal/scratch/scratch-pitr.sh` is the entrypoint for the scratch hosts: `check`, `source-install`, `source-prepare` (on
+`crm-rehearsal-pitr-src`) and `restore` (on `crm-rehearsal-pitr-restore`). Its header lists the full contract. In short:
 
-Network use on the scratch hosts: package mirrors (apt) and S3 `eu-west-2`, nothing else.
+- **The guard is part of the script and re-runs before every step** that installs, writes configuration, changes WAL settings,
+  restarts, backs up or restores (`guard passed before '...'` is printed each time). Bucket, region, ping URLs and host are never read
+  from the environment or a prompt.
+- **Identity:** a root-owned 0600 `/etc/rehearsal-scratch/identity` created by the operator when the host is created (role, exact
+  hostname, `/etc/machine-id`, scratch bucket, region, PG major, data directory, stanza). It must agree with the constants in the
+  reviewed file, the machine's real hostname and machine-id, and not be a protected live host or hold a protected live address
+  (`172.26.9.114`, `172.26.0.238`, `18.169.221.228`). Hostname and environment are not treated as AWS resource identity; the
+  AWS-side identity of the scratch bucket and users is evidenced by the export in "Evidence before any backup" (no metadata or AWS
+  call is made by the script).
+- **Also checked:** no `PING_URL`/`ARCHIVE_PING_URL` in the environment (even empty) or `alert.env`; no `/etc/cron.d/pgbackrest`;
+  an existing `pgbackrest.conf` names only the scratch bucket, is mode 0600 and never the live bucket; on a running server
+  `archive_mode` is read (a failed query is a **failure**, `always` is refused; the restore host must be exactly `off`), the data
+  directory must match, no database named like `dbscheckcrm*` may exist, and on the source `listen_addresses` is localhost only and
+  `pg_hba_file_rules` is queried for any remote rule. After a restore the **last** `archive_mode` in the restored
+  `postgresql.auto.conf` must be `off` or the restored cluster is not started.
+- **Secrets:** `/root/rehearsal-secrets/scratch-pitr-rw.env` (source) and `scratch-pitr-ro.env` (restore); root 0700 directory, 0600
+  file, strict `S3_KEY`/`S3_SECRET`/`PASSPHRASE` lines (never `source`d, anything else such as a ping URL is refused). There is no
+  generate/print-passphrase branch; tracing (`bash -x`, `SHELLOPTS`) is refused before a secret is read. The restore uses the
+  read-only file only and never falls back to the read-write one.
+- **Not installed:** cron jobs, the monitor, the archive watch, any alert URL.
+- Tested (`rehearsal/tests/test-scratch.sh`, 57 checks) with every system call replaced by a recording fake and fictional sentinel
+  secrets: each guard failure above stops the run with no install/WAL/backup/restore call; drift between steps (hostname changes after the package step;
+  a cron file appears after the restart) stops the next step; the sentinels appear in no output and no command argument. **Not tested:** real apt, PostgreSQL,
+  pgBackRest or S3 behaviour: those first run on the scratch hosts, after approval.
+
+`scratch-preflight.sh` remains as a read-only report (`verify-config` after the fact) but is no longer the safeguard.
 
 ## Cleanup
 

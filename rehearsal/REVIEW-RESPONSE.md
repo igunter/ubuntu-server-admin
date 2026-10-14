@@ -1,5 +1,7 @@
 # Response to the 14 October script review (client review of revision 44f60de)
 
+> Superseded where it conflicts by `REVIEW-RESPONSE-2.md` (review of 4d94396): in particular item 3 (`SECRET_FD` is no longer accepted) and item 5 (firewall exceptions are now opt-in; `ct direction` removed).
+
 The four reviewed digests match commit 44f60de exactly (create-rehearsal-db.sh c12535c5…, verify-roles.sh 21091d6d…,
 egress-plan.md 625bfd52…, scratch-storage.md c2ca7108…), so the right files were reviewed. The corrected files below have **new
 hashes**; the full commit ID and `MANIFEST.sha256` are sent separately. Nothing has been run on any real host. Test results are from

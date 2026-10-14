@@ -14,7 +14,7 @@ A "blocked" result is only half the evidence. The other half is the firewall's d
 (egress-lockdown.sh status) AND the sink's own log showing no hit from the application host. A timeout alone
 is not proof.
 """
-import argparse, errno, socket, sys
+import argparse, errno, os, socket, sys
 
 PAYLOAD = b"rehearsal-egress-probe (harmless synthetic datagram)\n"
 fails = 0
@@ -65,6 +65,29 @@ def udp(family, addr, port, expect, label):
         result(not replied, f"{label}: {'reply RECEIVED (it must not)' if replied else 'no reply (' + why + '); confirm the sink log shows no datagram'}")
 
 
+def ipv6_state(proc_sys="/proc/sys", proc_net="/proc/net"):
+    """(demonstrably_disabled, description). Disabled only if the kernel has no IPv6, or disable_ipv6 is 1 for
+    'all' and 'default' AND no interface other than lo has an IPv6 address of any scope. 'No global address' alone
+    is NOT proof: a link-local or ULA address, or a route, may still give a usable path."""
+    try:
+        with open(os.path.join(proc_net, "if_inet6")) as f:
+            addrs = [l.split() for l in f if l.strip()]
+    except FileNotFoundError:
+        return True, "the kernel has no IPv6 (no /proc/net/if_inet6)"
+    except OSError as e:
+        return False, f"cannot read if_inet6 ({e})"
+    flags = {}
+    for d in ("all", "default"):
+        try:
+            with open(os.path.join(proc_sys, "net/ipv6/conf", d, "disable_ipv6")) as f:
+                flags[d] = f.read().strip()
+        except OSError:
+            flags[d] = "unreadable"
+    other = [a[5] for a in addrs if len(a) >= 6 and a[5] != "lo"]
+    desc = f"disable_ipv6 all={flags['all']} default={flags['default']}; addresses outside lo: {', '.join(sorted(set(other))) or 'none'}"
+    return (flags["all"] == "1" and flags["default"] == "1" and not other), desc
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--expect", choices=["open", "blocked"], required=True)
@@ -85,9 +108,14 @@ def main():
     udp(socket.AF_INET, a.sink4, 5353, a.expect, f"IPv4 udp {a.sink4}:5353 (harmless payload)")
     if a.sink6:
         tcp(socket.AF_INET6, a.sink6, 443, a.expect, f"IPv6 tcp [{a.sink6}]:443")
+        tcp(socket.AF_INET6, a.sink6, 444, a.expect, f"IPv6 tcp [{a.sink6}]:444")
         udp(socket.AF_INET6, a.sink6, 5353, a.expect, f"IPv6 udp [{a.sink6}]:5353 (harmless payload)")
     else:
-        print("NOTE  no --sink6 given: IPv6 was not tested. Only acceptable if the host has no IPv6 address at all.")
+        disabled, desc = ipv6_state()
+        if a.expect == "blocked":
+            result(disabled, f"IPv6 state: {'demonstrably disabled' if disabled else 'IPv6 is USABLE here and no --sink6 was given, so it was not tested'} ({desc})")
+        else:
+            print(f"NOTE  IPv6 state (baseline, no --sink6): {desc}")
     if a.db_ip:
         tcp(socket.AF_INET, a.db_ip, a.db_port, "open", f"database {a.db_ip}:{a.db_port} (the one permitted path)")
     print("NOTE  the cloud metadata address is deliberately NOT contacted. Its block is shown by the rule order and counters.")
