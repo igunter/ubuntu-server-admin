@@ -51,7 +51,7 @@ generated passphrase. Their hashes stay in `MANIFEST.sha256` only because they a
   call is made by the script).
 - **Also checked:** no `PING_URL`/`ARCHIVE_PING_URL` in the environment (even empty) or `alert.env`; no `/etc/cron.d/pgbackrest`;
   an existing `pgbackrest.conf` names only the scratch bucket, is mode 0600 and never the live bucket; on a running server
-  `archive_mode` is read (a failed query is a **failure**, `always` is refused; the restore host must be exactly `off`), the data
+  `archive_mode` is read (a failed query is a **failure**, `always` is refused; whether PostgreSQL is running is read from `systemctl is-active`'s exit status **and** output, and only the documented answers (`active`; `inactive`/`failed`/`unknown` with status 3 or 4) are accepted, so a bus, permission or transport error is a guard failure, not "not running"; the restore host must be exactly `off`), the data
   directory must match, no database named like `dbscheckcrm*` may exist, and on the source `listen_addresses` is localhost only and
   `pg_hba_file_rules` is queried for any remote rule. After a restore the **last** `archive_mode` in the restored
   `postgresql.auto.conf` must be `off` or the restored cluster is not started.
@@ -60,7 +60,7 @@ generated passphrase. Their hashes stay in `MANIFEST.sha256` only because they a
   generate/print-passphrase branch; tracing (`bash -x`, `SHELLOPTS`) is refused before a secret is read. The restore uses the
   read-only file only and never falls back to the read-write one.
 - **Not installed:** cron jobs, the monitor, the archive watch, any alert URL.
-- Tested (`rehearsal/tests/test-scratch.sh`, 57 checks) with every system call replaced by a recording fake and fictional sentinel
+- Tested (`rehearsal/tests/test-scratch.sh`, 81 checks) with every system call replaced by a recording fake and fictional sentinel
   secrets: each guard failure above stops the run with no install/WAL/backup/restore call; drift between steps (hostname changes after the package step;
   a cron file appears after the restart) stops the next step; the sentinels appear in no output and no command argument. **Not tested:** real apt, PostgreSQL,
   pgBackRest or S3 behaviour: those first run on the scratch hosts, after approval.

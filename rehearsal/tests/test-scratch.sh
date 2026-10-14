@@ -21,7 +21,7 @@ drive() { # drive SUBCOMMAND [stdin]
       FAKE_HOST=${FAKE_HOST:-crm-rehearsal-pitr-src}; FAKE_MID=${FAKE_MID:-machine-1234}; FAKE_IPS=${FAKE_IPS:-"2: eth0    inet 172.26.5.7/20 brd x"}
       FAKE_ACTIVE=${FAKE_ACTIVE:-0}; FAKE_ARCH=${FAKE_ARCH:-off}; FAKE_LISTEN=${FAKE_LISTEN:-localhost}; FAKE_HBA=${FAKE_HBA:-0}; FAKE_DBS=${FAKE_DBS:-postgres}; FAKE_DATADIR=${FAKE_DATADIR:-/var/lib/postgresql/16/main}
       g_hostname() { echo "$FAKE_HOST"; }; g_machine_id() { echo "$FAKE_MID"; }; g_ipv4() { echo "$FAKE_IPS"; }
-      g_active() { [[ $FAKE_ACTIVE == 1 ]]; }
+      g_active_state() { case "$FAKE_ACTIVE" in 1) echo "0 active" ;; 0) echo "3 inactive" ;; failed) echo "3 failed" ;; missing) echo "4 unknown" ;; *) echo "$FAKE_ACTIVE" ;; esac; }
       g_pg() { echo "pg $*" >>"$T/calls"; case "$*" in
           *"SHOW archive_mode"*) [[ $FAKE_ARCH == FAIL ]] && return 1; echo "$FAKE_ARCH" ;;
           *"SHOW data_directory"*) echo "$FAKE_DATADIR" ;; *"FROM pg_database WHERE NOT"*) echo "$FAKE_DBS" ;;
@@ -81,6 +81,25 @@ for case in \
     # apply the assignment as environment for drive
     eval "$assign" 2>/dev/null; drive source-install "$SI"
     refused "$label"; unset FAKE_HOST FAKE_MID FAKE_IPS FAKE_ACTIVE FAKE_ARCH FAKE_LISTEN FAKE_HBA FAKE_DBS FAKE_DATADIR EXTRA
+done
+echo "== an inspection failure of is-active is not 'PostgreSQL is not running' (review 2cc127a)"
+for st in "1 Failed to connect to bus: Permission denied" "1 Access denied" "255 Transport endpoint is not connected" "0 activating" "3 deactivating" "3 " "0 inactive" "error"; do
+    reset; FAKE_ACTIVE=$st drive source-install "$SI"; refused "source: is-active answered '$st'"
+    reset; mkid restore crm-rehearsal-pitr-restore; mksec scratch-pitr-ro.env; FAKE_HOST=crm-rehearsal-pitr-restore FAKE_ACTIVE=$st TARGET='2026-10-16 15:05:30.123456+01' drive restore $'RESTORE-TEST\n'; refused "restore: is-active answered '$st'"
+done
+reset; drive check; check "documented 'inactive' (3) is accepted as not running" $RC
+reset; FAKE_ACTIVE=failed drive check; check "documented 'failed' (3) is accepted as not running" $RC
+reset; FAKE_ACTIVE=missing drive check; check "'unknown' (no such unit, 4) is accepted as not running" $RC
+reset; FAKE_ACTIVE=1 drive check; check "'active' leads to the running-server checks, which pass for a clean source" $RC
+reset; FAKE_ACTIVE=1 FAKE_ARCH=always drive check; check "'active' with archive_mode=always is still refused" $((RC == 0))
+echo "== the real g_active_state wrapper reports exit status and output (stub systemctl on PATH)"
+mkdir -p "$T/bin"; cat >"$T/bin/systemctl" <<'SC'
+#!/usr/bin/env bash
+case ${STUB_MODE:-} in active) echo active; exit 0 ;; inactive) echo inactive; exit 3 ;; denied) echo "Failed to connect to system scope bus: Permission denied" >&2; exit 1 ;; esac
+SC
+chmod +x "$T/bin/systemctl"
+for m in "active|0 active" "inactive|3 inactive" "denied|1 Failed to connect to system scope bus: Permission denied"; do
+    got=$( . "$SC"; PATH=$T/bin:$PATH STUB_MODE=${m%%|*} g_active_state ); check "wrapper for '${m%%|*}' returns '${m#*|}'" $([[ $got == "${m#*|}" ]]; echo $?)
 done
 echo "== identity file refusals"
 reset; mkid source crm-rehearsal-pitr-src dbs-check-crm-backups; drive source-install "$SI"; refused "identity names the LIVE bucket"

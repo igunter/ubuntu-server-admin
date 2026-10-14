@@ -58,7 +58,8 @@ ROOT_PREFIX=""   # empty on a real host; only the tests set it
 g_hostname()   { hostname; }
 g_machine_id() { cat /etc/machine-id; }
 g_ipv4()       { ip -4 -o addr show; }
-g_active()     { systemctl is-active --quiet "postgresql@${ID_PG_MAJOR:-16}-main"; }
+# Prints "<exit status> <output>" so the caller can tell "inactive" from "could not ask" (bus, permission, transport errors).
+g_active_state() { local o r=0; o=$(systemctl is-active "postgresql@${ID_PG_MAJOR:-16}-main" 2>&1) || r=$?; echo "$r $(head -n 1 <<<"$o")"; }
 g_pg()         { runuser -u postgres -- psql -v ON_ERROR_STOP=1 -X -Atq "$@"; }
 g_apt()        { DEBIAN_FRONTEND=noninteractive apt-get "$@"; }
 g_pgbackrest() { runuser -u postgres -- pgbackrest "$@"; }
@@ -113,7 +114,16 @@ guard() {
         [[ -z $conf_buckets || $conf_buckets == "$SCRATCH_BUCKET" ]] || G_WHY+=("$CONF names a bucket other than the scratch bucket")
         [[ $(stat -c '%a' "$CONF" 2>/dev/null || echo x) == 600 ]] || G_WHY+=("$CONF is not mode 0600")
     fi
-    if [[ -n $ID_PG_MAJOR ]] && g_active 2>/dev/null; then
+    local running=0 st=
+    if [[ -n $ID_PG_MAJOR ]]; then
+        st=$(g_active_state) || st="error"
+        case $st in
+            "0 active") running=1 ;;
+            "3 inactive"|"3 failed"|"3 unknown"|"4 unknown"|"4 inactive") running=0 ;;   # the documented "not running / no such unit" answers
+            *) G_WHY+=("cannot tell whether PostgreSQL is running (systemctl is-active returned: '$st'); an inspection failure is not 'not running'") ;;
+        esac
+    fi
+    if ((running)); then
         n=$(g_pg -c 'SHOW archive_mode') || { n=; G_WHY+=("cannot read archive_mode from the running server"); }
         if [[ -n $n ]]; then
             if [[ $want == restore ]]; then [[ $n == off ]] || G_WHY+=("archive_mode is '$n' on the restore host (must be off)")

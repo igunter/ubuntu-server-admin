@@ -1,4 +1,4 @@
-Regression run 2026-10-14T15:00:14Z  commit-base: 4d9439649295571d5324191dc6d79586db6caaf3  dirty-files: 14
+Regression run 2026-10-14T15:33:36Z  commit-base: 2cc127a3e6d42c03ca85ff3a8ae8c14c7bbb0b27  dirty-files: 5
 bash 5.2.21(1)-release; nftables v1.0.9 (Old Doc Yak #3); postgres (PostgreSQL) 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1)
 
 ################ test-provisioning.sh
@@ -119,11 +119,11 @@ exit status of test-verifier.sh: 0
   ok    status passes
   ok    require passes (silent)
 == connections that were open before the lockdown
-    (ops.log 13 -> 19, app22.log 13 -> 19)
+    (ops.log 13 -> 20, app22.log 13 -> 20)
   ok    operator session still works both ways
   ok    UNAPPROVED inbound session receives nothing more (no replies/queued pushes leak)
   ok    app-started connection to the sink delivers nothing more
-    (appdb.log 19 -> 30, db.log 19 -> 30)
+    (appdb.log 20 -> 30, db.log 20 -> 30)
   ok    app-started connection to the database continues both ways
   ok    output drop counter rose (the blocked pushes were counted)
 == probes (as blocked) and drops
@@ -200,6 +200,32 @@ exit status of test-firewall.sh: 0
   ok    source has a remote pg_hba rule (HBA is inspected)
   ok    cluster holds dbscheckcrm
   ok    running cluster's data directory differs from the identity
+== an inspection failure of is-active is not 'PostgreSQL is not running' (review 2cc127a)
+  ok    source: is-active answered '1 Failed to connect to bus: Permission denied'
+  ok    restore: is-active answered '1 Failed to connect to bus: Permission denied'
+  ok    source: is-active answered '1 Access denied'
+  ok    restore: is-active answered '1 Access denied'
+  ok    source: is-active answered '255 Transport endpoint is not connected'
+  ok    restore: is-active answered '255 Transport endpoint is not connected'
+  ok    source: is-active answered '0 activating'
+  ok    restore: is-active answered '0 activating'
+  ok    source: is-active answered '3 deactivating'
+  ok    restore: is-active answered '3 deactivating'
+  ok    source: is-active answered '3 '
+  ok    restore: is-active answered '3 '
+  ok    source: is-active answered '0 inactive'
+  ok    restore: is-active answered '0 inactive'
+  ok    source: is-active answered 'error'
+  ok    restore: is-active answered 'error'
+  ok    documented 'inactive' (3) is accepted as not running
+  ok    documented 'failed' (3) is accepted as not running
+  ok    'unknown' (no such unit, 4) is accepted as not running
+  ok    'active' leads to the running-server checks, which pass for a clean source
+  ok    'active' with archive_mode=always is still refused
+== the real g_active_state wrapper reports exit status and output (stub systemctl on PATH)
+  ok    wrapper for 'active' returns '0 active'
+  ok    wrapper for 'inactive' returns '3 inactive'
+  ok    wrapper for 'denied' returns '1 Failed to connect to system scope bus: Permission denied'
 == identity file refusals
   ok    identity names the LIVE bucket
   ok    identity file mode 0644
@@ -239,7 +265,7 @@ exit status of test-firewall.sh: 0
   ok      and printed no sentinel
   ok    SHELLOPTS=xtrace refused
 
-RESULT: 57 passed, 0 failed
+RESULT: 81 passed, 0 failed
 exit status of test-scratch.sh: 0
 
 ALL SUITES PASSED
